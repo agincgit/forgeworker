@@ -5,6 +5,7 @@ import (
     "fmt"
     "os"
     "os/exec"
+    "path/filepath"
     "strings"
 
     log "github.com/sirupsen/logrus"
@@ -41,10 +42,10 @@ func GetConfig(name string) *Config {
     if curDir, err = os.Getwd(); err != nil {
         log.Fatal(err)
     }
-    confDir = fmt.Sprintf("%s/appconfig", curDir)
-    logDir = fmt.Sprintf("%s/applogs", curDir)
+    confDir = filepath.Join(curDir, "appconfig")
+    logDir = filepath.Join(curDir, "applogs")
 
-    if _, err := os.Stat(confDir + "/" + name); os.IsNotExist(err) {
+    if _, err := os.Stat(filepath.Join(confDir, name)); os.IsNotExist(err) {
         log.Panicln("Config file not found")
     }
     log.Debug(confDir)
@@ -59,7 +60,7 @@ func GetConfig(name string) *Config {
         viper.Set("LogLocation", logDir)
         viper.Set("TaskForgeAPIURL", "https://api.taskforge.local")
 
-        viper.WriteConfigAs(confDir + "/config.json")
+        viper.WriteConfigAs(filepath.Join(confDir, "config.json"))
     } else {
         log.Debug("Config Loaded")
     }
