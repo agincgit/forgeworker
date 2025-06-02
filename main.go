@@ -1,6 +1,7 @@
 package main
 
 import (
+    "context"
     "time"
 
     log "github.com/sirupsen/logrus"
@@ -16,6 +17,8 @@ func main() {
         log.Fatalf("Worker registration failed: %v", err)
     }
 
-    service.StartHeartbeatScheduler(cfg, workerID, 30*time.Second)
-    service.StartWorkerLoop(cfg, workerID)
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+    service.StartHeartbeatScheduler(ctx, cfg, workerID, 30*time.Second)
+    service.StartWorkerLoop(ctx, cfg, workerID, cancel)
 }
