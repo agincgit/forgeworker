@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -116,21 +117,27 @@ func SendHeartbeat(cfg *config.Config, workerID string) error {
 }
 
 // StartHeartbeatScheduler starts a periodic task to send heartbeats.
-func StartHeartbeatScheduler(cfg *config.Config, workerID string, interval time.Duration) {
+func StartHeartbeatScheduler(ctx context.Context, cfg *config.Config, workerID string, interval time.Duration) {
 	log.Infof("Starting heartbeat scheduler for WorkerID: %s", workerID)
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		for range ticker.C {
-			if err := SendHeartbeat(cfg, workerID); err != nil {
-				log.Errorf("Heartbeat error: %v", err)
+		for {
+			select {
+			case <-ctx.Done():
+				log.Info("Heartbeat scheduler stopped")
+				return
+			case <-ticker.C:
+				if err := SendHeartbeat(cfg, workerID); err != nil {
+					log.Errorf("Heartbeat error: %v", err)
+				}
 			}
 		}
 	}()
 }
 
 // StartWorkerLoop runs the worker loop to fetch, execute, and update task statuses.
-func StartWorkerLoop(cfg *config.Config, workerID string) {
+func StartWorkerLoop(ctx context.Context, cfg *config.Config, workerID string, cancel context.CancelFunc) {
 	log.Info("Starting worker loop...")
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -142,6 +149,10 @@ func StartWorkerLoop(cfg *config.Config, workerID string) {
 		select {
 		case <-sigChan:
 			log.Warn("Received shutdown signal, stopping worker loop.")
+			cancel()
+			return
+		case <-ctx.Done():
+			log.Info("Context canceled, stopping worker loop.")
 			return
 		case <-ticker.C:
 			executePendingTasks(cfg, workerID)
