@@ -1,3 +1,5 @@
+// Package service provides the core worker functionality including
+// registration, heartbeat management, and task execution loop.
 package service
 
 import (
@@ -13,7 +15,8 @@ import (
 
 	"github.com/agincgit/forgeworker/config"
 	"github.com/agincgit/forgeworker/handler"
-	log "github.com/sirupsen/logrus"
+	"github.com/agincgit/forgeworker/logger"
+	"github.com/rs/zerolog"
 )
 
 // WorkerRegistrationPayload represents the data sent to TaskForge for worker registration.
@@ -31,37 +34,38 @@ type WorkerHeartbeatPayload struct {
 
 // RegisterWorker registers the worker with TaskForge.
 func RegisterWorker(cfg *config.Config) (string, error) {
+	log := logger.WithComponent("registration")
 	url := fmt.Sprintf("%s/workers", cfg.TaskForgeAPIURL)
 
 	payload := WorkerRegistrationPayload{
-		WorkerType: "ForgeWorker",
+		WorkerType: cfg.WorkerType,
 		HostName:   cfg.HostName,
 		StartTime:  time.Now(),
 	}
 
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		log.Errorf("Failed to marshal worker registration payload: %v", err)
+		log.Error().Err(err).Msg("Failed to marshal worker registration payload")
 		return "", err
 	}
 
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(payloadBytes))
 	if err != nil {
-		log.Errorf("Failed to create worker registration request: %v", err)
+		log.Error().Err(err).Msg("Failed to create worker registration request")
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: cfg.HTTPTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Errorf("Failed to register worker: %v", err)
+		log.Error().Err(err).Msg("Failed to register worker")
 		return "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
-		log.Errorf("Worker registration failed with status code: %d", resp.StatusCode)
+		log.Error().Int("status_code", resp.StatusCode).Msg("Worker registration failed")
 		return "", fmt.Errorf("registration failed: %s", resp.Status)
 	}
 
@@ -69,16 +73,17 @@ func RegisterWorker(cfg *config.Config) (string, error) {
 		WorkerID string `json:"worker_id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		log.Errorf("Failed to decode worker registration response: %v", err)
+		log.Error().Err(err).Msg("Failed to decode worker registration response")
 		return "", err
 	}
 
-	log.Infof("Worker successfully registered with TaskForge. WorkerID: %s", response.WorkerID)
+	log.Info().Str("worker_id", response.WorkerID).Msg("Worker successfully registered with TaskForge")
 	return response.WorkerID, nil
 }
 
 // SendHeartbeat sends a periodic heartbeat to TaskForge to indicate worker is active.
 func SendHeartbeat(cfg *config.Config, workerID string) error {
+	log := logger.WithWorkerID(workerID)
 	url := fmt.Sprintf("%s/workers/%s/heartbeat", cfg.TaskForgeAPIURL, workerID)
 
 	payload := WorkerHeartbeatPayload{
@@ -88,48 +93,50 @@ func SendHeartbeat(cfg *config.Config, workerID string) error {
 
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		log.Errorf("Failed to marshal heartbeat payload: %v", err)
+		log.Error().Err(err).Msg("Failed to marshal heartbeat payload")
 		return err
 	}
 
 	req, err := http.NewRequest("PUT", url, bytes.NewBuffer(payloadBytes))
 	if err != nil {
-		log.Errorf("Failed to create heartbeat request: %v", err)
+		log.Error().Err(err).Msg("Failed to create heartbeat request")
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: cfg.HTTPTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Errorf("Failed to send heartbeat: %v", err)
+		log.Error().Err(err).Msg("Failed to send heartbeat")
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Errorf("Heartbeat failed with status code: %d", resp.StatusCode)
+		log.Error().Int("status_code", resp.StatusCode).Msg("Heartbeat failed")
 		return fmt.Errorf("heartbeat failed: %s", resp.Status)
 	}
 
-	log.Infof("Heartbeat successfully sent for WorkerID: %s", workerID)
+	log.Debug().Msg("Heartbeat sent successfully")
 	return nil
 }
 
 // StartHeartbeatScheduler starts a periodic task to send heartbeats.
-func StartHeartbeatScheduler(ctx context.Context, cfg *config.Config, workerID string, interval time.Duration) {
-	log.Infof("Starting heartbeat scheduler for WorkerID: %s", workerID)
+func StartHeartbeatScheduler(ctx context.Context, cfg *config.Config, workerID string) {
+	log := logger.WithWorkerID(workerID)
+	log.Info().Dur("interval", cfg.HeartbeatInterval).Msg("Starting heartbeat scheduler")
+
 	go func() {
-		ticker := time.NewTicker(interval)
+		ticker := time.NewTicker(cfg.HeartbeatInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
-				log.Info("Heartbeat scheduler stopped")
+				log.Info().Msg("Heartbeat scheduler stopped")
 				return
 			case <-ticker.C:
 				if err := SendHeartbeat(cfg, workerID); err != nil {
-					log.Errorf("Heartbeat error: %v", err)
+					log.Error().Err(err).Msg("Heartbeat error")
 				}
 			}
 		}
@@ -138,42 +145,47 @@ func StartHeartbeatScheduler(ctx context.Context, cfg *config.Config, workerID s
 
 // StartWorkerLoop runs the worker loop to fetch, execute, and update task statuses.
 func StartWorkerLoop(ctx context.Context, cfg *config.Config, workerID string, cancel context.CancelFunc) {
-	log.Info("Starting worker loop...")
+	log := logger.WithWorkerID(workerID)
+	log.Info().Dur("poll_interval", cfg.PollInterval).Msg("Starting worker loop")
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-sigChan:
-			log.Warn("Received shutdown signal, stopping worker loop.")
+			log.Warn().Msg("Received shutdown signal, stopping worker loop")
 			cancel()
 			return
 		case <-ctx.Done():
-			log.Info("Context canceled, stopping worker loop.")
+			log.Info().Msg("Context canceled, stopping worker loop")
 			return
 		case <-ticker.C:
-			executePendingTasks(cfg, workerID)
+			executePendingTasks(cfg, workerID, log)
 		}
 	}
 }
 
-func executePendingTasks(cfg *config.Config, workerID string) {
+func executePendingTasks(cfg *config.Config, workerID string, log zerolog.Logger) {
 	tasks, err := handler.FetchPendingTasks(cfg, workerID)
 	if err != nil {
-		log.Errorf("Error fetching tasks: %v", err)
+		log.Error().Err(err).Msg("Error fetching tasks")
 		return
 	}
 
 	for _, task := range tasks {
-		log.Infof("Processing task ID: %s", task.ID)
+		taskLog := log.With().Str("task_id", task.ID).Logger()
+		taskLog.Info().Str("type", task.Type).Msg("Processing task")
+
 		err := handler.ExecuteTask(task)
 		if err != nil {
-			log.Errorf("Task %s failed: %v", task.ID, err)
+			taskLog.Error().Err(err).Msg("Task failed")
 			handler.UpdateTaskStatus(cfg, task.ID, "failed", err.Error())
 		} else {
+			taskLog.Info().Msg("Task completed successfully")
 			handler.UpdateTaskStatus(cfg, task.ID, "completed", "Task executed successfully")
 		}
 	}

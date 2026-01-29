@@ -1,3 +1,5 @@
+// Package handler provides task handling functionality including
+// fetching, execution, and status updates.
 package handler
 
 import (
@@ -8,7 +10,7 @@ import (
 	"time"
 
 	"github.com/agincgit/forgeworker/config"
-	log "github.com/sirupsen/logrus"
+	"github.com/agincgit/forgeworker/logger"
 )
 
 // Task represents a task retrieved from TaskForge.
@@ -20,87 +22,111 @@ type Task struct {
 	RequestorID string    `json:"requestor_id"`
 }
 
+// TaskStatusUpdate represents the payload for updating task status.
+type TaskStatusUpdate struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
+}
+
 // FetchPendingTasks retrieves pending tasks assigned to this worker.
 func FetchPendingTasks(cfg *config.Config, workerID string) ([]Task, error) {
+	log := logger.WithComponent("task-fetcher")
 	url := fmt.Sprintf("%s/tasks?worker_id=%s&status=pending", cfg.TaskForgeAPIURL, workerID)
 
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: cfg.HTTPTimeout}
+	resp, err := client.Get(url)
 	if err != nil {
-		log.Errorf("Failed to fetch tasks: %v", err)
+		log.Error().Err(err).Str("worker_id", workerID).Msg("Failed to fetch tasks")
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Errorf("Task fetching failed with status code: %d", resp.StatusCode)
+		log.Error().
+			Int("status_code", resp.StatusCode).
+			Str("worker_id", workerID).
+			Msg("Task fetching failed")
 		return nil, fmt.Errorf("failed to fetch tasks: %s", resp.Status)
 	}
 
 	var tasks []Task
 	if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
-		log.Errorf("Failed to decode task response: %v", err)
+		log.Error().Err(err).Msg("Failed to decode task response")
 		return nil, err
 	}
 
-	log.Infof("Fetched %d pending tasks", len(tasks))
+	log.Debug().
+		Int("count", len(tasks)).
+		Str("worker_id", workerID).
+		Msg("Fetched pending tasks")
 	return tasks, nil
 }
 
 // ExecuteTask processes a given task based on its type.
 func ExecuteTask(task Task) error {
-	log.Infof("Executing task ID: %s, Type: %s", task.ID, task.Type)
+	log := logger.WithComponent("task-executor").With().
+		Str("task_id", task.ID).
+		Str("task_type", task.Type).
+		Logger()
+
+	log.Info().Msg("Executing task")
 
 	switch task.Type {
 	case "data-processing":
-		log.Info("Processing data...")
+		log.Debug().Msg("Processing data")
 		time.Sleep(2 * time.Second)
 	case "file-transfer":
-		log.Info("Transferring files...")
+		log.Debug().Msg("Transferring files")
 		time.Sleep(3 * time.Second)
 	default:
-		log.Warnf("Unknown task type: %s", task.Type)
+		log.Warn().Msg("Unknown task type")
 		return fmt.Errorf("unsupported task type: %s", task.Type)
 	}
 
-	log.Infof("Task ID %s completed successfully", task.ID)
+	log.Info().Msg("Task execution completed")
 	return nil
 }
 
 // UpdateTaskStatus updates the task status in TaskForge.
 func UpdateTaskStatus(cfg *config.Config, taskID string, status string, message string) error {
+	log := logger.WithComponent("task-updater").With().
+		Str("task_id", taskID).
+		Str("status", status).
+		Logger()
+
 	url := fmt.Sprintf("%s/tasks/%s", cfg.TaskForgeAPIURL, taskID)
 
-	payload := map[string]string{
-		"status":  status,
-		"message": message,
+	payload := TaskStatusUpdate{
+		Status:  status,
+		Message: message,
 	}
 
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		log.Errorf("Failed to marshal task status update payload: %v", err)
+		log.Error().Err(err).Msg("Failed to marshal task status update payload")
 		return err
 	}
 
 	req, err := http.NewRequest("PUT", url, bytes.NewBuffer(payloadBytes))
 	if err != nil {
-		log.Errorf("Failed to create task status update request: %v", err)
+		log.Error().Err(err).Msg("Failed to create task status update request")
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: cfg.HTTPTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Errorf("Failed to update task status: %v", err)
+		log.Error().Err(err).Msg("Failed to update task status")
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Errorf("Task status update failed with status code: %d", resp.StatusCode)
+		log.Error().Int("status_code", resp.StatusCode).Msg("Task status update failed")
 		return fmt.Errorf("status update failed: %s", resp.Status)
 	}
 
-	log.Infof("Task ID %s status updated to %s", taskID, status)
+	log.Debug().Msg("Task status updated")
 	return nil
 }
