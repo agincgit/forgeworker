@@ -27,6 +27,9 @@ type Config struct {
 	// TaskForgeAPIURL is the base URL for the TaskForge API
 	TaskForgeAPIURL string `env:"TASKFORGE_API_URL" envDefault:"https://api.taskforge.local"`
 
+	// APIToken is the authentication token for TaskForge API
+	APIToken string `env:"TASKFORGE_API_TOKEN"`
+
 	// WorkerID allows overriding the auto-detected worker identifier
 	// If not set, hostname will be used
 	WorkerID string `env:"WORKER_ID"`
@@ -42,6 +45,25 @@ type Config struct {
 
 	// HTTPTimeout is the timeout for HTTP requests to TaskForge API
 	HTTPTimeout time.Duration `env:"HTTP_TIMEOUT" envDefault:"10s"`
+
+	// HealthServerAddr is the address for the health check server (e.g., ":8080")
+	// If empty, health server is disabled
+	HealthServerAddr string `env:"HEALTH_SERVER_ADDR" envDefault:":8080"`
+
+	// ShutdownTimeout is the maximum time to wait for graceful shutdown
+	ShutdownTimeout time.Duration `env:"SHUTDOWN_TIMEOUT" envDefault:"30s"`
+
+	// MaxConcurrentTasks is the maximum number of tasks to process concurrently
+	MaxConcurrentTasks int `env:"MAX_CONCURRENT_TASKS" envDefault:"1"`
+
+	// RetryMaxAttempts is the maximum number of retry attempts for API calls
+	RetryMaxAttempts int `env:"RETRY_MAX_ATTEMPTS" envDefault:"5"`
+
+	// RetryInitialDelay is the initial delay before the first retry
+	RetryInitialDelay time.Duration `env:"RETRY_INITIAL_DELAY" envDefault:"1s"`
+
+	// RetryMaxDelay is the maximum delay between retries
+	RetryMaxDelay time.Duration `env:"RETRY_MAX_DELAY" envDefault:"30s"`
 
 	// HostName is the detected or configured hostname of the worker
 	// This is set automatically if WorkerID is not provided
@@ -80,14 +102,20 @@ func MustLoad() *Config {
 // environment variables. Useful for testing or programmatic configuration.
 func NewWithDefaults() *Config {
 	return &Config{
-		LogLevel:          "info",
-		LogFormat:         "json",
-		TaskForgeAPIURL:   "https://api.taskforge.local",
-		WorkerType:        "ForgeWorker",
-		PollInterval:      10 * time.Second,
-		HeartbeatInterval: 30 * time.Second,
-		HTTPTimeout:       10 * time.Second,
-		HostName:          detectHostname(),
+		LogLevel:           "info",
+		LogFormat:          "json",
+		TaskForgeAPIURL:    "https://api.taskforge.local",
+		WorkerType:         "ForgeWorker",
+		PollInterval:       10 * time.Second,
+		HeartbeatInterval:  30 * time.Second,
+		HTTPTimeout:        10 * time.Second,
+		HealthServerAddr:   ":8080",
+		ShutdownTimeout:    30 * time.Second,
+		MaxConcurrentTasks: 1,
+		RetryMaxAttempts:   5,
+		RetryInitialDelay:  1 * time.Second,
+		RetryMaxDelay:      30 * time.Second,
+		HostName:           detectHostname(),
 	}
 }
 
@@ -130,5 +158,16 @@ func (c *Config) Validate() error {
 	if c.HeartbeatInterval <= 0 {
 		return fmt.Errorf("HEARTBEAT_INTERVAL must be positive")
 	}
+	if c.MaxConcurrentTasks <= 0 {
+		return fmt.Errorf("MAX_CONCURRENT_TASKS must be positive")
+	}
+	if c.ShutdownTimeout <= 0 {
+		return fmt.Errorf("SHUTDOWN_TIMEOUT must be positive")
+	}
 	return nil
+}
+
+// HasAuth returns true if an API token is configured.
+func (c *Config) HasAuth() bool {
+	return c.APIToken != ""
 }
